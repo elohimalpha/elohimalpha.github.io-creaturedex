@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CREATURÉDEX</title>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1010; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    @keyframes flicker { 0%,100%{opacity:1} 50%{opacity:.97} 75%{opacity:.99} }
+    @keyframes screenOn { 0%{opacity:0;filter:brightness(3) blur(4px)} 100%{opacity:1;filter:brightness(1) blur(0)} }
+    .blink { animation: blink 1s step-start infinite; }
+    .screen-text { font-family: 'VT323', monospace; }
+    .pixel-text  { font-family: 'Press Start 2P', monospace; }
+    .screen-anim { animation: screenOn .4s ease-out; }
+    ::-webkit-scrollbar { width:4px; background:#1a0a0a; }
+    ::-webkit-scrollbar-thumb { background:#cc2200; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // ── Default Data ──────────────────────────────────────────────────────────
+    const DEFAULT_ELEMENTS = [
+      "Fire","Water","Earth","Wind","Lightning","Ice","Shadow","Light",
+      "Nature","Void","Metal","Poison","Psychic","Arcane","Gravity"
+    ];
+    const DEFAULT_BASES = [
+      { name:"Bear",     tags:["fur","carnivore","large","claws"] },
+      { name:"Wolf",     tags:["fur","carnivore","pack","swift"] },
+      { name:"Serpent",  tags:["scales","venomous","ambush","legless"] },
+      { name:"Hawk",     tags:["feathers","aerial","keen-eyed","talons"] },
+      { name:"Frog",     tags:["amphibian","jumper","sticky-tongue","small"] },
+      { name:"Crab",     tags:["shell","aquatic","claws","scuttler"] },
+      { name:"Elk",      tags:["fur","herbivore","antlers","large"] },
+      { name:"Mantis",   tags:["chitin","insect","ambush","bladed"] },
+      { name:"Eel",      tags:["scales","aquatic","electric","slippery"] },
+      { name:"Oak",      tags:["bark","rooted","ancient","flora"] },
+      { name:"Mushroom", tags:["spores","fungi","toxic","flora"] },
+      { name:"Bat",      tags:["fur","aerial","echolocation","nocturnal"] },
+    ];
+    const DEFAULT_ROLES = [
+      "Tank","Striker","Support","Controller","Scout",
+      "Summoner","Assassin","Defender","Brawler","Sniper"
+    ];
+    const ELEMENT_COLORS = {
+      Fire:"#ff6b35",Water:"#4fc3f7",Earth:"#a5845a",Wind:"#80cbc4",
+      Lightning:"#ffd54f",Ice:"#b3e5fc",Shadow:"#ce93d8",Light:"#fff176",
+      Nature:"#aed581",Void:"#9575cd",Metal:"#b0bec5",Poison:"#c5e1a5",
+      Psychic:"#f48fb1",Arcane:"#7986cb",Gravity:"#ef9a9a"
+    };
+
+    const pick    = arr => arr[Math.floor(Math.random() * arr.length)];
+    const uid     = ()  => Math.random().toString(36).slice(2, 9);
+    const elColor = el  => ELEMENT_COLORS[el] || "#aaa";
+
+    // ── localStorage ──────────────────────────────────────────────────────────
+    const LS = {
+      get: (k,fb) => { try { const v=localStorage.getItem(k); return v?JSON.parse(v):fb; } catch { return fb; } },
+      set: (k,v)  => { try { localStorage.setItem(k,JSON.stringify(v)); } catch {} },
+    };
+
+    // ── Google Sheets / Drive helpers ─────────────────────────────────────────
+    const GS_URL_KEY = "cdex_gs_url";
+    const gsGetUrl   = () => localStorage.getItem(GS_URL_KEY) || "";
+    const gsSaveUrl  = (url) => localStorage.setItem(GS_URL_KEY, url);
+
+    const gsPush = async (scriptUrl, payload) => {
+      const slim = { ...payload, saved: payload.saved.map(({ imageData, ...rest }) => rest) };
+      const res  = await fetch(scriptUrl, {
+        method:"POST", headers:{"Content-Type":"text/plain"},
+        body: JSON.stringify({ action:"push", data:slim }), redirect:"follow",
+      });
+      const text = await res.text();
+      let json; try { json=JSON.parse(text); } catch { throw new Error(text||"No response"); }
+      if (json.status !== "ok") throw new Error(json.message || "Push failed");
+    };
+
+    const gsPull = async (scriptUrl) => {
+      const res  = await fetch(`${scriptUrl}?action=pull&_=${Date.now()}`, { redirect:"follow" });
+      const text = await res.text();
+      let json; try { json=JSON.parse(text); } catch { throw new Error(text||"No response"); }
+      if (json.status !== "ok") throw new Error(json.message || "Pull failed");
+      return json.data;
+    };
+
+    // ── Style constants ───────────────────────────────────────────────────────
+    const RED="  #cc2200",RED_D="#8a1600",RED_L="#ee3311",RED_HL="#ff5533",CREAM="#f5e6d3";
+
+    const S = {
+      page:{ minHeight:"100vh", background:"#1a1010", display:"flex", alignItems:"center", justifyContent:"center", padding:"20px 10px", fontFamily:"'Press Start 2P',monospace" },
+      dex:{ width:"100%", maxWidth:420, display:"flex", flexDirection:"column", filter:"drop-shadow(0 8px 32px #00000088)" },
+      topHalf:{ background:"linear-gradient(160deg,#ee3311 0%,#cc2200 60%,#8a1600 100%)", borderRadius:"18px 18px 0 0", padding:"14px 14px 10px", border:"2px solid #ff5533", borderBottom:"none", boxShadow:"inset 0 2px 0 #ff774455,inset 0 -2px 0 #8a100055", position:"relative" },
+      topDecor:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 },
+      camera:{ width:22, height:22, borderRadius:"50%", background:"#1a1a3a", border:"3px solid #333366", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 0 6px #3333ff44" },
+      cameraInner:{ width:10, height:10, borderRadius:"50%", background:"radial-gradient(circle at 35% 35%,#5555ff,#11113a)" },
+      led:{ width:10, height:10, borderRadius:"50%" },
+      titleBar:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, paddingBottom:6, borderBottom:"1px solid #8a160088" },
+      titleText:{ fontSize:10, color:CREAM, letterSpacing:1, textShadow:"0 1px 0 #8a1600" },
+      titleVer:{ fontSize:7, color:"#f5e6d366" },
+      screenHousing:{ background:"#2a1a00", borderRadius:8, padding:6, position:"relative", border:"3px solid #1a0800", boxShadow:"inset 0 2px 6px #00000066,0 2px 0 #ff664433" },
+      screenBezel:{ background:"#0a1a0a", borderRadius:4, overflow:"hidden", position:"relative", minHeight:280, border:"2px solid #0a0a0a" },
+      scanlines:{ position:"absolute", inset:0, zIndex:3, pointerEvents:"none", backgroundImage:"repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.18) 2px,rgba(0,0,0,.18) 4px)", borderRadius:4 },
+      flickerOverlay:{ position:"absolute", inset:0, zIndex:4, pointerEvents:"none", animation:"flicker 4s infinite", borderRadius:4, background:"linear-gradient(rgba(144,255,144,.01),rgba(144,255,144,.03))" },
+      screenContent:{ position:"relative", zIndex:2, padding:"10px 10px", minHeight:280, background:"#0a150a", color:"#88cc88" },
+      screw:{ position:"absolute", width:6, height:6, borderRadius:"50%", background:"#331500", border:"1px solid #1a0800" },
+      hinge:{ display:"flex", height:14, border:"2px solid #8a1600", borderTop:"2px solid #8a1600", borderBottom:"2px solid #8a1400" },
+      hingeLeft:{ flex:1, background:"#8a1600" },
+      hingeMid:{ width:40, background:"#550f00", borderLeft:"2px solid #330800", borderRight:"2px solid #330800" },
+      hingeRight:{ flex:1, background:"#8a1600" },
+      bottomHalf:{ background:"linear-gradient(180deg,#cc2200 0%,#8a1600 100%)", borderRadius:"0 0 18px 18px", padding:"14px 14px 16px", border:"2px solid #ff5533", borderTop:"2px solid #8a1600", boxShadow:"inset 0 2px 0 #ff443322" },
+      controls:{ display:"flex", gap:14, alignItems:"flex-start", marginBottom:12 },
+      dpadArea:{ display:"flex", flexDirection:"column", gap:4 },
+      dpadBtn:{ fontSize:7, padding:"6px 10px", cursor:"pointer", background:"#1a0800", color:"#cc8855", border:"2px solid #330f00", borderRadius:2, letterSpacing:1, boxShadow:"0 3px 0 #0a0400", transition:"all .1s", fontFamily:"'Press Start 2P',monospace" },
+      dpadBtnActive:{ background:"#330f00", color:CREAM, borderColor:"#664422", boxShadow:"0 1px 0 #0a0400", transform:"translateY(2px)" },
+      rightControls:{ marginLeft:"auto", display:"flex", flexDirection:"column", alignItems:"center", gap:4 },
+      abRow:{ display:"flex", gap:10, alignItems:"center" },
+      circleBtn:{ width:34, height:34, borderRadius:"50%", background:"#cc0033", color:CREAM, fontSize:10, border:"none", cursor:"pointer", boxShadow:"0 4px 0 #880022", transition:"all .1s", fontFamily:"'Press Start 2P',monospace" },
+      abLabel:{ fontSize:6, color:"#f5e6d366", letterSpacing:1 },
+      speaker:{ display:"flex", flexDirection:"column", gap:3, padding:"4px 0", marginLeft:"auto", width:60, marginBottom:8 },
+      speakerLine:{ height:2, background:"#8a1600", borderRadius:1 },
+      bottomLabel:{ textAlign:"center" },
+      ioBtn:{ fontSize:6, padding:"5px 8px", cursor:"pointer", background:"#1a0800", color:"#f5e6d399", border:"1px solid #8a1600", letterSpacing:1, fontFamily:"'Press Start 2P',monospace" },
+      configPanel:{ marginTop:8, padding:"10px 10px", background:"#0a0500", border:"1px solid #1a4a6a", display:"flex", flexDirection:"column" },
+      configLabel:{ fontSize:6, color:"#4a7a9a", marginBottom:3, display:"block" },
+      configInput:{ width:"100%", background:"#050a0f", border:"1px solid #1a4a6a", color:"#88bbdd", padding:"5px 6px", fontSize:14, outline:"none", fontFamily:"'VT323',monospace" },
+    };
+
+    const SC = {
+      root:{ display:"flex", flexDirection:"column", gap:6, height:"100%", minHeight:260 },
+      screenTitle:{ fontSize:8, color:"#aaffaa", letterSpacing:1, borderBottom:"1px solid #1a3a1a", paddingBottom:6, marginBottom:4, fontFamily:"'Press Start 2P',monospace" },
+      card:{ border:"1px solid #2a4a2a", padding:"8px 10px", background:"#050f05", display:"flex", flexDirection:"column", gap:5 },
+      cardEl:{ display:"flex", alignItems:"center", gap:6 },
+      elPip:{ width:8, height:8, borderRadius:"50%", flexShrink:0 },
+      elLabel:{ fontSize:16, letterSpacing:2 },
+      cardName:{ fontSize:32, fontWeight:700, color:"#ccffcc", lineHeight:1.1 },
+      cardRole:{ fontSize:7, color:"#6aaa6a", letterSpacing:1, fontFamily:"'Press Start 2P',monospace" },
+      tagRow:{ display:"flex", flexWrap:"wrap", gap:4 },
+      tag:{ border:"1px solid #2a4a2a", color:"#5a8a5a", fontSize:13, padding:"1px 6px", background:"transparent" },
+      desc:{ fontSize:13, color:"#5a8a5a", lineHeight:1.5, margin:0, fontStyle:"italic" },
+      hybridBadge:{ fontSize:13, color:"#aacc44" },
+      emptyScreen:{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:4 },
+      nameRow:{ display:"flex", alignItems:"center", gap:8, padding:"5px 0", borderTop:"1px solid #1a3a1a", marginTop:2 },
+      suggestedName:{ fontSize:26, fontWeight:700, color:"#ffdd44", flex:1, letterSpacing:1, lineHeight:1 },
+      nameBtn:{ fontSize:7, padding:"4px 8px", cursor:"pointer", background:"#0a1a00", color:"#ffdd44", border:"1px solid #4a4a00", fontFamily:"'Press Start 2P',monospace", whiteSpace:"nowrap" },
+      rollBtn:{ marginTop:"auto", padding:"8px 12px", fontSize:8, background:"#0a1a0a", color:"#aaffaa", border:"2px solid #2a5a2a", cursor:"pointer", letterSpacing:1, width:"100%", boxShadow:"0 3px 0 #051005", transition:"all .1s", fontFamily:"'Press Start 2P',monospace" },
+      subTabs:{ display:"flex", gap:4, marginBottom:6 },
+      subTab:{ fontSize:6, padding:"4px 6px", cursor:"pointer", background:"transparent", color:"#4a7a4a", border:"1px solid #1a3a1a", fontFamily:"'Press Start 2P',monospace" },
+      subTabActive:{ color:"#aaffaa", borderColor:"#4a8a4a", background:"#0a1a0a" },
+      listBody:{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" },
+      listPill:{ display:"inline-flex", alignItems:"center", gap:4, border:"1px solid", color:"#8acc8a", fontSize:15, padding:"2px 8px", background:"transparent" },
+      xBtn:{ background:"none", border:"none", color:"#4a6a4a", cursor:"pointer", fontSize:14, padding:0, lineHeight:1 },
+      input:{ flex:1, background:"#050f05", border:"1px solid #1a3a1a", color:"#88cc88", padding:"4px 6px", fontSize:15, outline:"none", fontFamily:"'VT323',monospace" },
+      addBtn:{ padding:"4px 8px", fontSize:10, cursor:"pointer", background:"#050f05", border:"1px solid", fontFamily:"'Press Start 2P',monospace" },
+      filterBar:{ display:"flex", flexDirection:"column", gap:3, marginBottom:4, paddingBottom:4, borderBottom:"1px solid #1a3a1a" },
+      filterGroup:{ display:"flex", alignItems:"center", gap:4 },
+      filterLabel:{ fontSize:6, color:"#4a7a4a", flexShrink:0, width:16, fontFamily:"'Press Start 2P',monospace" },
+      filterPills:{ display:"flex", flexWrap:"wrap", gap:3 },
+      filterPill:{ border:"1px solid", padding:"1px 5px", fontSize:13, cursor:"pointer", background:"transparent", fontFamily:"'VT323',monospace", lineHeight:1.3 },
+      dexNum:{ fontSize:6, color:"#4a7a4a", flexShrink:0, width:22, letterSpacing:0, fontFamily:"'Press Start 2P',monospace" },
+      notesPanel:{ border:"1px solid", borderTop:"none", padding:"6px 8px", background:"#020f02" },
+      imgArea:{ marginBottom:6 },
+      imgWrapper:{ position:"relative", display:"inline-block", width:"100%" },
+      imgEl:{ width:"100%", maxHeight:140, objectFit:"contain", display:"block", border:"1px solid #1a3a1a", background:"#010a01" },
+      imgOverlay:{ position:"absolute", bottom:0, left:0, right:0, display:"flex", gap:4, padding:"4px", background:"rgba(0,0,0,.7)", justifyContent:"flex-end" },
+      imgBtn:{ fontSize:5, padding:"3px 6px", cursor:"pointer", background:"#020f02", border:"1px solid #2a4a2a", color:"#6aaa6a", fontFamily:"'Press Start 2P',monospace" },
+      imgUploadBtn:{ width:"100%", minHeight:60, background:"#010a01", border:"1px dashed #1a3a1a", color:"#3a6a3a", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:2, fontFamily:"'Press Start 2P',monospace" },
+      rowThumb:{ width:20, height:20, objectFit:"cover", flexShrink:0, border:"1px solid #2a4a2a" },
+      notesArea:{ width:"100%", background:"transparent", border:"none", color:"#7aaa7a", fontSize:15, fontFamily:"'VT323',monospace", resize:"none", outline:"none", lineHeight:1.4 },
+      renameInput:{ width:"100%", background:"#020802", border:"1px solid", color:"#ccffcc", padding:"2px 4px", fontSize:16, fontFamily:"'VT323',monospace", outline:"none", lineHeight:1.1 },
+      bRow:{ display:"flex", alignItems:"center", gap:6, border:"1px solid", padding:"5px 7px", transition:"all .15s" },
+      elDot:{ width:8, height:8, borderRadius:"50%", flexShrink:0 },
+      miniBtn:{ fontSize:7, padding:"3px 5px", cursor:"pointer", background:"transparent", border:"1px solid", fontFamily:"'Press Start 2P',monospace" },
+    };
+
+    // ── App ───────────────────────────────────────────────────────────────────
+    function App() {
+      const [tab,      setTab]      = useState("roll");
+      const [elements, setElements] = useState(() => LS.get("cdex_elements", DEFAULT_ELEMENTS));
+      const [bases,    setBases]    = useState(() => LS.get("cdex_bases",    DEFAULT_BASES));
+      const [roles,    setRoles]    = useState(() => LS.get("cdex_roles",    DEFAULT_ROLES));
+      const [rolled,   setRolled]   = useState(null);
+      const [rolling,  setRolling]  = useState(false);
+      const rollRef   = useRef(null);
+      const importRef = useRef(null);
+      const [saved,         setSaved]         = useState(() => LS.get("cdex_saved", []));
+      const [hybridPick,    setHybridPick]    = useState([null,null]);
+      const [hybridResult,  setHybridResult]  = useState(null);
+      const [hybridLoading, setHybridLoading] = useState(false);
+      const [saveFlash,     setSaveFlash]     = useState(false);
+      const [syncStatus,    setSyncStatus]    = useState("idle");
+      const [syncMsg,       setSyncMsg]       = useState("");
+      const [showConfig,    setShowConfig]    = useState(false);
+      const [gsDebug,       setGsDebug]       = useState("");
+      const [gsUrlInput,    setGsUrlInput]    = useState(() => gsGetUrl());
+
+      useEffect(() => { LS.set("cdex_elements", elements); }, [elements]);
+      useEffect(() => { LS.set("cdex_bases",    bases);    }, [bases]);
+      useEffect(() => { LS.set("cdex_roles",    roles);    }, [roles]);
+      useEffect(() => { LS.set("cdex_saved",    saved);    }, [saved]);
+
+      const exportData = () => {
+        const data = { elements, bases, roles, saved, exportedAt: new Date().toISOString() };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type:"application/json" });
+        const url  = URL.createObjectURL(blob);
+        Object.assign(document.createElement("a"), { href:url, download:"creaturedex.json" }).click();
+        URL.revokeObjectURL(url);
+      };
+
+      const importData = (e) => {
+        const file = e.target.files?.[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const d = JSON.parse(ev.target.result);
+            if (d.elements) setElements(d.elements);
+            if (d.bases)    setBases(d.bases);
+            if (d.roles)    setRoles(d.roles);
+            if (d.saved)    setSaved(d.saved);
+            setSaveFlash(true); setTimeout(() => setSaveFlash(false), 2000);
+          } catch { alert("Invalid file."); }
+        };
+        reader.readAsText(file);
+        e.target.value = "";
+      };
+
+      const syncPush = async () => {
+        const url = gsGetUrl();
+        if (!url) { setShowConfig(true); return; }
+        setSyncStatus("pushing"); setSyncMsg(""); setGsDebug("");
+        try {
+          await gsPush(url, { elements, bases, roles, saved, pushedAt: new Date().toISOString() });
+          setSyncStatus("ok"); setSyncMsg("PUSHED ✓");
+        } catch (e) {
+          const msg = e?.message || String(e);
+          setSyncStatus("error"); setSyncMsg("PUSH FAILED");
+          setGsDebug(msg); setShowConfig(true);
+        }
+        setTimeout(() => setSyncStatus("idle"), 3500);
+      };
+
+      const syncPull = async () => {
+        const url = gsGetUrl();
+        if (!url) { setShowConfig(true); return; }
+        setSyncStatus("pulling"); setSyncMsg(""); setGsDebug("");
+        try {
+          const data = await gsPull(url);
+          if (data.elements) setElements(data.elements);
+          if (data.bases)    setBases(data.bases);
+          if (data.roles)    setRoles(data.roles);
+          if (data.saved)    setSaved(data.saved);
+          setSyncStatus("ok"); setSyncMsg("PULLED ✓");
+        } catch (e) {
+          const msg = e?.message || String(e);
+          setSyncStatus("error"); setSyncMsg("PULL FAILED");
+          setGsDebug(msg); setShowConfig(true);
+        }
+        setTimeout(() => setSyncStatus("idle"), 3500);
+      };
+
+      const saveConfig = () => { gsSaveUrl(gsUrlInput.trim()); setShowConfig(false); };
+
+      const rollCreature = () => {
+        if (rolling) return;
+        setRolling(true);
+        let ticks = 0;
+        rollRef.current = setInterval(() => {
+          ticks++;
+          setRolled({ element:pick(elements), base:pick(bases), role:pick(roles), id:null });
+          if (ticks >= 16) { clearInterval(rollRef.current); setRolling(false); }
+        }, 55);
+      };
+
+      const saveCreature = () => {
+        if (!rolled) return;
+        const c = { ...rolled, id:uid(), name:`${rolled.element} ${rolled.base.name}`, dexNum:saved.length+1 };
+        setSaved(p => [c,...p]);
+        setRolled(c);
+      };
+
+      const toggleHybrid = (creature) => {
+        setHybridPick(prev => {
+          if (prev[0]?.id===creature.id) return [null,prev[1]];
+          if (prev[1]?.id===creature.id) return [prev[0],null];
+          if (!prev[0]) return [creature,prev[1]];
+          if (!prev[1]) return [prev[0],creature];
+          return [creature,prev[1]];
+        });
+        setHybridResult(null);
+      };
+
+      const hybridize = async () => {
+        const [a,b] = hybridPick;
+        if (!a||!b) return;
+        setHybridLoading(true); setHybridResult(null);
+        try {
+          const prompt = `You are a creature designer for a tactical creature-collector game.
+Hybridize these two creatures:
+A: ${a.element} ${a.base.name} (Role: ${a.role}, Tags: ${a.base.tags.join(", ")})
+B: ${b.element} ${b.base.name} (Role: ${b.role}, Tags: ${b.base.tags.join(", ")})
+Return ONLY valid JSON, no markdown:
+{"name":"creative name","element":"blended element","baseName":"hybrid base","role":"role","tags":["t1","t2","t3","t4","t5"],"description":"2 sentences on appearance and fighting style"}`;
+          const res  = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,messages:[{role:"user",content:prompt}]})});
+          const data = await res.json();
+          const text = data.content.map(c=>c.text||"").join("").trim().replace(/```json|```/g,"").trim();
+          setHybridResult(JSON.parse(text));
+        } catch { setHybridResult({error:"HYBRIDIZATION FAILED"}); }
+        setHybridLoading(false);
+      };
+
+      const saveHybrid = () => {
+        if (!hybridResult||hybridResult.error) return;
+        const c = {id:uid(),name:hybridResult.name,element:hybridResult.element,role:hybridResult.role,base:{name:hybridResult.baseName,tags:hybridResult.tags||[]},description:hybridResult.description,isHybrid:true,parents:[hybridPick[0].name,hybridPick[1].name],dexNum:saved.length+1};
+        setSaved(p=>[c,...p]);
+        setHybridResult(null); setHybridPick([null,null]);
+      };
+
+      const deleteCreature  = id => { setSaved(p=>p.filter(c=>c.id!==id)); setHybridPick(p=>[p[0]?.id===id?null:p[0],p[1]?.id===id?null:p[1]]); };
+      const renameCreature  = (id,n) => setSaved(p=>p.map(c=>c.id===id?{...c,speciesName:n.trim()}:c));
+      const updateNotes     = (id,notes) => setSaved(p=>p.map(c=>c.id===id?{...c,notes}:c));
+      const updateImage     = (id,imageData) => setSaved(p=>p.map(c=>c.id===id?{...c,imageData}:c));
+
+      const syncColor = syncStatus==="ok"?"#33ff44":syncStatus==="error"?"#ff4444":"#4fc3f7";
+      const syncBorder= syncStatus==="ok"?"#336633":syncStatus==="error"?"#663333":"#1a4a6a";
+
+      return (
+        <div style={S.page}>
+          <div style={S.dex}>
+
+            {/* Top half */}
+            <div style={S.topHalf}>
+              <div style={S.topDecor}>
+                <div style={S.camera}><div style={S.cameraInner}/></div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <div style={{...S.led,background:"#ff3333",boxShadow:"0 0 6px #ff3333"}}/>
+                  <div style={{...S.led,background:"#ffee33",boxShadow:"0 0 6px #ffee33"}}/>
+                  <div style={{...S.led,background:"#33ff44",boxShadow:"0 0 6px #33ff44"}}/>
+                </div>
+              </div>
+              <div style={S.titleBar}>
+                <span className="pixel-text" style={S.titleText}>CREATURÉDEX</span>
+                <span className="pixel-text" style={S.titleVer}>v1.0</span>
+              </div>
+              <div style={S.screenHousing}>
+                <div style={S.screenBezel}>
+                  <div style={S.scanlines}/>
+                  <div style={S.flickerOverlay}/>
+                  <div className="screen-anim" style={S.screenContent} key={tab}>
+                    {tab==="roll"     && <RollScreen     rolled={rolled} rolling={rolling} rollCreature={rollCreature} saveCreature={saveCreature}/>}
+                    {tab==="lists"    && <ListsScreen    elements={elements} setElements={setElements} bases={bases} setBases={setBases} roles={roles} setRoles={setRoles}/>}
+                    {tab==="bestiary" && <BestiaryScreen saved={saved} hybridPick={hybridPick} toggleHybrid={toggleHybrid} deleteCreature={deleteCreature} renameCreature={renameCreature} updateNotes={updateNotes} updateImage={updateImage} hybridize={hybridize} hybridLoading={hybridLoading} hybridResult={hybridResult} saveHybrid={saveHybrid}/>}
+                  </div>
+                </div>
+                <div style={{...S.screw,top:4,left:4}}/><div style={{...S.screw,top:4,right:4}}/>
+                <div style={{...S.screw,bottom:4,left:4}}/><div style={{...S.screw,bottom:4,right:4}}/>
+              </div>
+            </div>
+
+            {/* Hinge */}
+            <div style={S.hinge}>
+              <div style={S.hingeLeft}/><div style={S.hingeMid}/><div style={S.hingeRight}/>
+            </div>
+
+            {/* Bottom half */}
+            <div style={S.bottomHalf}>
+              <div style={S.controls}>
+                <div style={S.dpadArea}>
+                  {[["roll","ROLL"],["lists","LISTS"],["bestiary","DEX"]].map(([id,label])=>(
+                    <button key={id} className="pixel-text"
+                      style={{...S.dpadBtn,...(tab===id?S.dpadBtnActive:{})}}
+                      onClick={()=>setTab(id)}>{label}</button>
+                  ))}
+                </div>
+                <div style={S.rightControls}>
+                  <div style={S.abRow}>
+                    <button className="pixel-text" style={S.circleBtn} onClick={tab==="roll"?rollCreature:undefined}>A</button>
+                    <button className="pixel-text" style={{...S.circleBtn,background:"#1a3a8a",boxShadow:"0 4px 0 #0d1f4a"}}
+                      onClick={tab==="roll"&&rolled&&!rolled.id&&!rolling?saveCreature:undefined}>B</button>
+                  </div>
+                  <span className="pixel-text" style={S.abLabel}>A=ROLL  B=SAVE</span>
+                </div>
+              </div>
+              <div style={S.speaker}>{[...Array(7)].map((_,i)=><div key={i} style={S.speakerLine}/>)}</div>
+              <div style={S.bottomLabel}>
+                <span className="pixel-text" style={{fontSize:7,color:"#8a2200",letterSpacing:2}}>CREATURE DESIGN SYSTEM</span>
+                <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:8,flexWrap:"wrap"}}>
+                  <button className="pixel-text" style={S.ioBtn} onClick={exportData}>▼ EXPORT</button>
+                  <button className="pixel-text" style={S.ioBtn} onClick={()=>importRef.current?.click()}>▲ IMPORT</button>
+                  <button className="pixel-text" style={{...S.ioBtn,color:syncColor,borderColor:syncBorder}}
+                    onClick={syncPush} disabled={syncStatus==="pushing"||syncStatus==="pulling"}>
+                    {syncStatus==="pushing"?"…":"☁ PUSH"}
+                  </button>
+                  <button className="pixel-text" style={{...S.ioBtn,color:syncColor,borderColor:syncBorder}}
+                    onClick={syncPull} disabled={syncStatus==="pushing"||syncStatus==="pulling"}>
+                    {syncStatus==="pulling"?"…":"☁ PULL"}
+                  </button>
+                  <button className="pixel-text" style={{...S.ioBtn,color:"#aaa",borderColor:"#333"}} onClick={()=>setShowConfig(v=>!v)}>⚙</button>
+                  <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={importData}/>
+                </div>
+                {(saveFlash||syncMsg) && (
+                  <div className="pixel-text" style={{fontSize:6,color:syncStatus==="error"?"#ff4444":"#33ff44",marginTop:4,textAlign:"center"}}>
+                    {syncMsg||(saveFlash?"✓ IMPORTED OK":"")}
+                  </div>
+                )}
+                {showConfig && (
+                  <div style={S.configPanel}>
+                    <div className="pixel-text" style={{fontSize:7,color:"#4fc3f7",marginBottom:8}}>☁ SHEETS CONFIG</div>
+                    <label className="pixel-text" style={S.configLabel}>APPS SCRIPT URL</label>
+                    <input className="screen-text" style={S.configInput}
+                      value={gsUrlInput} onChange={e=>setGsUrlInput(e.target.value)}
+                      placeholder="https://script.google.com/macros/s/..."/>
+                    {gsDebug && (
+                      <div className="screen-text" style={{marginTop:6,padding:"4px 6px",background:"#1a0000",border:"1px solid #4a0000",color:"#ff6666",fontSize:13,wordBreak:"break-all"}}>
+                        {gsDebug}
+                      </div>
+                    )}
+                    <div style={{display:"flex",gap:6,marginTop:8,justifyContent:"flex-end"}}>
+                      <button className="pixel-text" style={{...S.ioBtn,color:"#aaa"}} onClick={()=>{setShowConfig(false);setGsDebug("");}}>CANCEL</button>
+                      <button className="pixel-text" style={{...S.ioBtn,color:"#4fc3f7",borderColor:"#1a4a6a"}} onClick={()=>{setGsDebug("");saveConfig();}}>SAVE</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── RollScreen ────────────────────────────────────────────────────────────
+    function RollScreen({ rolled, rolling, rollCreature, saveCreature }) {
+      const [suggestedName, setSuggestedName] = useState(null);
+      const [naming,        setNaming]        = useState(false);
+      useEffect(() => { setSuggestedName(null); }, [rolled?.element, rolled?.base?.name, rolled?.role]);
+
+      const suggestName = async () => {
+        if (!rolled||naming) return;
+        setNaming(true); setSuggestedName(null);
+        try {
+          const prompt = `You are naming creatures for a creature-collector tactical game (think Pokémon).
+Generate ONE single invented species name for this creature:
+- Element: ${rolled.element}
+- Base animal/plant: ${rolled.base.name}
+- Battle role: ${rolled.role}
+- Tags: ${rolled.base.tags?.join(", ")||"none"}
+Rules: One word only, no spaces/hyphens. Invented portmanteau. Bulbasaur/Magmar/Quilava style. 2-4 syllables.
+Reply with ONLY the single word. Nothing else.`;
+          const res  = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:20,messages:[{role:"user",content:prompt}]})});
+          const data = await res.json();
+          const word = data.content.map(c=>c.text||"").join("").trim().replace(/[^a-zA-Z]/g,"");
+          if (word) setSuggestedName(word);
+        } catch { setSuggestedName("ERROR"); }
+        setNaming(false);
+      };
+
+      return (
+        <div style={SC.root}>
+          <div className="pixel-text" style={SC.screenTitle}>
+            {rolling?<span className="blink">▶ SCANNING...</span>:"▶ CREATURE ROLL"}
+          </div>
+          {rolled ? (
+            <div style={SC.card}>
+              <div style={SC.cardEl}>
+                <span style={{...SC.elPip,background:elColor(rolled.element)}}/>
+                <span className="screen-text" style={{...SC.elLabel,color:elColor(rolled.element)}}>{rolled.element.toUpperCase()}</span>
+              </div>
+              <div className="screen-text" style={SC.cardName}>{rolled.base.name}</div>
+              <div className="pixel-text" style={SC.cardRole}>[ {rolled.role} ]</div>
+              {rolled.base.tags?.length>0 && (
+                <div style={SC.tagRow}>
+                  {rolled.base.tags.map(t=><span key={t} className="screen-text" style={SC.tag}>{t}</span>)}
+                </div>
+              )}
+              {!rolling && (
+                <div style={SC.nameRow}>
+                  {suggestedName&&suggestedName!=="ERROR" ? (
+                    <>
+                      <span className="screen-text" style={SC.suggestedName}>{suggestedName}</span>
+                      <button className="pixel-text" style={SC.nameBtn} onClick={suggestName}>↺</button>
+                    </>
+                  ) : (
+                    <button className="pixel-text" style={SC.nameBtn} onClick={suggestName} disabled={naming}>
+                      {naming?<span className="blink">…</span>:"★ NAME IT"}
+                    </button>
+                  )}
+                  {suggestedName==="ERROR"&&<span className="pixel-text" style={{fontSize:6,color:"#ff4444"}}>ERROR</span>}
+                </div>
+              )}
+              {rolled.description && <p className="screen-text" style={SC.desc}>{rolled.description}</p>}
+              {rolled.isHybrid && <div className="screen-text" style={SC.hybridBadge}>⚗ {rolled.parents?.join(" × ")}</div>}
+              {!rolled.id&&!rolling && <div style={{marginTop:8,textAlign:"center"}}><span className="pixel-text" style={{fontSize:7,color:"#8aff8a"}}>PRESS B TO SAVE</span></div>}
+              {rolled.id && <div style={{marginTop:8,textAlign:"center"}}><span className="pixel-text" style={{fontSize:7,color:"#ffdd44"}}>★ SAVED TO DEX</span></div>}
+            </div>
+          ) : (
+            <div style={SC.emptyScreen}>
+              <div className="screen-text" style={{fontSize:40,color:"#2a4a2a",lineHeight:1}}>?</div>
+              <div className="pixel-text" style={{fontSize:8,color:"#4a6a4a",marginTop:8}}>PRESS A TO ROLL</div>
+              <div className="pixel-text" style={{fontSize:6,color:"#2a4a2a",marginTop:4}}>NO DATA</div>
+            </div>
+          )}
+          <button className="pixel-text" style={SC.rollBtn} onClick={rollCreature} disabled={rolling}>
+            {rolling?<span className="blink">SEARCHING...</span>:"▶ ROLL [A]"}
+          </button>
+        </div>
+      );
+    }
+
+    // ── ListsScreen ───────────────────────────────────────────────────────────
+    function ListsScreen({ elements, setElements, bases, setBases, roles, setRoles }) {
+      const [subTab, setSubTab] = useState("elements");
+      return (
+        <div style={SC.root}>
+          <div className="pixel-text" style={SC.screenTitle}>▶ LIST EDITOR</div>
+          <div style={SC.subTabs}>
+            {[["elements","ELEM"],["bases","BASE"],["roles","ROLE"],["tags","TAGS"]].map(([id,label])=>(
+              <button key={id} className="pixel-text" style={{...SC.subTab,...(subTab===id?SC.subTabActive:{})}} onClick={()=>setSubTab(id)}>{label}</button>
+            ))}
+          </div>
+          <div style={SC.listBody}>
+            {subTab==="elements" && <MiniListEditor items={elements} setItems={setElements} accent="#ff6b35"/>}
+            {subTab==="bases"    && <MiniListEditor items={bases.map(b=>b.name)} setItems={names=>{
+              setBases(prev=>{const m=Object.fromEntries(prev.map(b=>[b.name,b]));return names.map(n=>m[n]||{name:n,tags:[]});});
+            }} accent="#80cbc4"/>}
+            {subTab==="roles"    && <MiniListEditor items={roles} setItems={setRoles} accent="#f48fb1"/>}
+            {subTab==="tags"     && <TagEditorScreen bases={bases} setBases={setBases}/>}
+          </div>
+        </div>
+      );
+    }
+
+    function MiniListEditor({ items, setItems, accent }) {
+      const [val, setVal] = useState("");
+      const add = () => { const v=val.trim(); if(v&&!items.includes(v)){setItems([...items,v]);setVal("");} };
+      return (
+        <div style={{display:"flex",flexDirection:"column",gap:6,height:"100%"}}>
+          <div style={{display:"flex",flexWrap:"wrap",gap:4,flex:1,alignContent:"flex-start",overflowY:"auto"}}>
+            {items.map(item=>(
+              <div key={item} className="screen-text" style={{...SC.listPill,borderColor:accent}}>
+                {item}
+                <button style={SC.xBtn} onClick={()=>setItems(items.filter(i=>i!==item))}>×</button>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:4,marginTop:"auto"}}>
+            <input className="screen-text" style={SC.input} value={val} onChange={e=>setVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="ADD NEW..." maxLength={24}/>
+            <button className="pixel-text" style={{...SC.addBtn,borderColor:accent,color:accent}} onClick={add}>+</button>
+          </div>
+        </div>
+      );
+    }
+
+    function TagEditorScreen({ bases, setBases }) {
+      const [sel, setSel] = useState(null);
+      const [val, setVal] = useState("");
+      const base = bases.find(b=>b.name===sel);
+      const addTag = () => {
+        const t=val.trim().toLowerCase();
+        if(!t||!base||base.tags.includes(t)) return;
+        setBases(p=>p.map(b=>b.name===sel?{...b,tags:[...b.tags,t]}:b));
+        setVal("");
+      };
+      return (
+        <div style={{display:"flex",flexDirection:"column",gap:6,height:"100%"}}>
+          <div className="pixel-text" style={{fontSize:7,color:"#6aaa6a",marginBottom:2}}>SELECT CREATURE:</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:3,maxHeight:60,overflowY:"auto"}}>
+            {bases.map(b=>(
+              <button key={b.name} className="screen-text"
+                style={{...SC.listPill,borderColor:sel===b.name?"#ffdd44":"#2a4a2a",color:sel===b.name?"#ffdd44":"#8aaa8a",background:"transparent",cursor:"pointer",padding:"2px 6px",fontSize:14}}
+                onClick={()=>setSel(b.name===sel?null:b.name)}>{b.name}</button>
+            ))}
+          </div>
+          {base && (
+            <>
+              <div className="pixel-text" style={{fontSize:7,color:"#ffdd44"}}>{base.name.toUpperCase()} TAGS:</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:3,flex:1,alignContent:"flex-start"}}>
+                {base.tags.map(t=>(
+                  <span key={t} className="screen-text" style={{...SC.tag,cursor:"pointer",borderColor:"#4a6a4a"}}
+                    onClick={()=>setBases(p=>p.map(b=>b.name===sel?{...b,tags:b.tags.filter(x=>x!==t)}:b))}>{t} ×</span>
+                ))}
+              </div>
+              <div style={{display:"flex",gap:4}}>
+                <input className="screen-text" style={SC.input} value={val} onChange={e=>setVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTag()} placeholder="ADD TAG..." maxLength={20}/>
+                <button className="pixel-text" style={{...SC.addBtn,borderColor:"#ffdd44",color:"#ffdd44"}} onClick={addTag}>+</button>
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ── BestiaryScreen ────────────────────────────────────────────────────────
+    function BestiaryScreen({ saved, hybridPick, toggleHybrid, deleteCreature, renameCreature, updateNotes, updateImage, hybridize, hybridLoading, hybridResult, saveHybrid }) {
+      const [subView,        setSubView]        = useState("list");
+      const [editingId,      setEditingId]      = useState(null);
+      const [editVal,        setEditVal]        = useState("");
+      const [filterEl,       setFilterEl]       = useState("ALL");
+      const [filterRole,     setFilterRole]     = useState("ALL");
+      const [notesOpen,      setNotesOpen]      = useState(null);
+      const [driveUploading, setDriveUploading] = useState(null);
+      const imgRefs   = {};
+      const driveRefs = {};
+
+      const startEdit   = (c) => { setEditingId(c.id); setEditVal(c.speciesName||c.name||`${c.element} ${c.base.name}`); };
+      const commitEdit  = (id) => { if (editVal.trim()) renameCreature(id,editVal); setEditingId(null); };
+      const toggleNotes = (id) => setNotesOpen(prev=>prev===id?null:id);
+
+      const handleImageUpload = (id, e) => {
+        const file=e.target.files?.[0]; if(!file) return;
+        if(file.size>2*1024*1024){alert("Image must be under 2MB.");return;}
+        const reader=new FileReader();
+        reader.onload=(ev)=>updateImage(id,ev.target.result);
+        reader.readAsDataURL(file);
+        e.target.value="";
+      };
+
+      const handleDriveUpload = async (creature, e) => {
+        const file=e.target.files?.[0]; if(!file) return;
+        const gsUrl=gsGetUrl();
+        if(!gsUrl){alert("Set your Apps Script URL in ⚙ config first.");return;}
+        setDriveUploading(creature.id);
+        try {
+          const base64=await new Promise((res,rej)=>{
+            const r=new FileReader();
+            r.onload=()=>res(r.result.split(",")[1]);
+            r.onerror=()=>rej(new Error("Read failed"));
+            r.readAsDataURL(file);
+          });
+          const name=creature.speciesName||creature.name||`${creature.element} ${creature.base.name}`;
+          const resp=await fetch(gsUrl,{
+            method:"POST",headers:{"Content-Type":"text/plain"},
+            body:JSON.stringify({action:"uploadImage",filename:`${name.replace(/\s+/g,"_")}_${creature.id}.${file.name.split(".").pop()}`,mimeType:file.type,base64}),
+            redirect:"follow",
+          });
+          const json=JSON.parse(await resp.text());
+          if(json.status!=="ok") throw new Error(json.message);
+          updateImage(creature.id,json.url);
+        } catch(err){alert("Drive upload failed: "+err.message);}
+        setDriveUploading(null);
+        e.target.value="";
+      };
+
+      const allElements = ["ALL",...Array.from(new Set(saved.map(c=>c.element))).sort()];
+      const allRoles    = ["ALL",...Array.from(new Set(saved.map(c=>c.role))).sort()];
+      const visible     = saved.filter(c=>(filterEl==="ALL"||c.element===filterEl)&&(filterRole==="ALL"||c.role===filterRole));
+      const fmtNum      = n => n?`#${String(n).padStart(3,"0")}`:"---";
+
+      return (
+        <div style={SC.root}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div className="pixel-text" style={SC.screenTitle}>▶ DEX [{visible.length}/{saved.length}]</div>
+            <button className="pixel-text" style={{...SC.subTab,...(subView==="hybridize"?SC.subTabActive:{}),fontSize:6}}
+              onClick={()=>setSubView(v=>v==="list"?"hybridize":"list")}>⚗ FUSE</button>
+          </div>
+
+          {subView==="list" ? (
+            <>
+              {saved.length>0 && (
+                <div style={SC.filterBar}>
+                  <div style={SC.filterGroup}>
+                    <span className="pixel-text" style={SC.filterLabel}>EL:</span>
+                    <div style={SC.filterPills}>
+                      {allElements.map(el=>(
+                        <button key={el} className="screen-text"
+                          style={{...SC.filterPill,borderColor:filterEl===el?(el==="ALL"?"#aaffaa":elColor(el)):"#1a3a1a",color:filterEl===el?(el==="ALL"?"#aaffaa":elColor(el)):"#4a6a4a",background:filterEl===el?"#0a1a0a":"transparent"}}
+                          onClick={()=>setFilterEl(el)}>{el==="ALL"?"ALL":el.slice(0,3).toUpperCase()}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={SC.filterGroup}>
+                    <span className="pixel-text" style={SC.filterLabel}>RL:</span>
+                    <div style={SC.filterPills}>
+                      {allRoles.map(r=>(
+                        <button key={r} className="screen-text"
+                          style={{...SC.filterPill,borderColor:filterRole===r?"#aaffaa":"#1a3a1a",color:filterRole===r?"#aaffaa":"#4a6a4a",background:filterRole===r?"#0a1a0a":"transparent"}}
+                          onClick={()=>setFilterRole(r)}>{r==="ALL"?"ALL":r.slice(0,4).toUpperCase()}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {saved.length===0 ? (
+                <div style={SC.emptyScreen}>
+                  <div className="pixel-text" style={{fontSize:8,color:"#4a6a4a"}}>DEX IS EMPTY</div>
+                  <div className="pixel-text" style={{fontSize:6,color:"#2a4a2a",marginTop:6}}>ROLL & SAVE CREATURES</div>
+                </div>
+              ) : visible.length===0 ? (
+                <div style={SC.emptyScreen}>
+                  <div className="pixel-text" style={{fontSize:7,color:"#4a6a4a"}}>NO MATCH</div>
+                  <div className="pixel-text" style={{fontSize:6,color:"#2a4a2a",marginTop:6}}>CLEAR FILTERS</div>
+                </div>
+              ) : (
+                <div style={{display:"flex",flexDirection:"column",gap:4,overflowY:"auto",flex:1}}>
+                  {visible.map(c=>{
+                    const col=elColor(c.element);
+                    const isPicked=hybridPick[0]?.id===c.id||hybridPick[1]?.id===c.id;
+                    const pickNum=hybridPick[0]?.id===c.id?1:hybridPick[1]?.id===c.id?2:0;
+                    return (
+                      <div key={c.id} style={{display:"flex",flexDirection:"column"}}>
+                        <div className="screen-text"
+                          style={{...SC.bRow,borderColor:isPicked?col:notesOpen===c.id?"#2a4a2a":"#1a3a1a",background:isPicked?"#0a1a0a":"transparent",borderBottomColor:notesOpen===c.id?"transparent":""}}>
+                          <span className="pixel-text" style={SC.dexNum}>{fmtNum(c.dexNum)}</span>
+                          {c.imageData
+                            ? <img src={c.imageData} alt="" style={SC.rowThumb}/>
+                            : <span style={{...SC.elDot,background:col,flexShrink:0}}/>
+                          }
+                          <div style={{flex:1,minWidth:0}}>
+                            {editingId===c.id ? (
+                              <input className="screen-text" autoFocus style={{...SC.renameInput,borderColor:col}}
+                                value={editVal} onChange={e=>setEditVal(e.target.value)}
+                                onKeyDown={e=>{if(e.key==="Enter")commitEdit(c.id);if(e.key==="Escape")setEditingId(null);}}
+                                onBlur={()=>commitEdit(c.id)} maxLength={32}/>
+                            ) : (
+                              <div style={{fontSize:18,color:"#cce8cc",lineHeight:1.1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer"}}
+                                onClick={()=>startEdit(c)}>
+                                {c.speciesName||c.name||`${c.element} ${c.base.name}`}
+                                <span style={{fontSize:11,color:"#3a6a3a",marginLeft:4}}>✎</span>
+                              </div>
+                            )}
+                            <div style={{fontSize:13,color:"#4a7a4a"}}>{c.role}{c.isHybrid?" · ⚗":""}</div>
+                          </div>
+                          <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                            <button className="pixel-text"
+                              style={{...SC.miniBtn,borderColor:notesOpen===c.id?"#6a9a6a":c.notes?"#3a6a3a":"#2a4a2a",color:notesOpen===c.id?"#aaffaa":c.notes?"#6aaa6a":"#4a6a4a"}}
+                              onClick={()=>toggleNotes(c.id)}>{notesOpen===c.id?"▲":"▼"}{c.notes?" ●":""}</button>
+                            <button className="pixel-text" style={{...SC.miniBtn,borderColor:isPicked?col:"#2a4a2a",color:isPicked?col:"#4a6a4a"}}
+                              onClick={()=>toggleHybrid(c)}>{isPicked?`✓${pickNum}`:"+"}</button>
+                            <button className="pixel-text" style={{...SC.miniBtn,borderColor:"#4a1a1a",color:"#6a3a3a"}}
+                              onClick={()=>deleteCreature(c.id)}>✕</button>
+                          </div>
+                        </div>
+                        {notesOpen===c.id && (
+                          <div style={{...SC.notesPanel,borderColor:isPicked?col:"#2a4a2a"}}>
+                            <div style={SC.imgArea}>
+                              {c.imageData ? (
+                                <div style={SC.imgWrapper}>
+                                  <img src={c.imageData} alt="creature" style={SC.imgEl}/>
+                                  <div style={SC.imgOverlay}>
+                                    <button className="pixel-text" style={SC.imgBtn} onClick={()=>imgRefs[c.id]?.click()}>📷 LOCAL</button>
+                                    <button className="pixel-text" style={{...SC.imgBtn,color:"#4fc3f7",borderColor:"#1a4a6a"}}
+                                      onClick={()=>driveRefs[c.id]?.click()} disabled={driveUploading===c.id}>
+                                      {driveUploading===c.id?"…":"☁ DRIVE"}
+                                    </button>
+                                    <button className="pixel-text" style={{...SC.imgBtn,color:"#aa4444",borderColor:"#4a1a1a"}}
+                                      onClick={()=>updateImage(c.id,null)}>✕</button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div style={{display:"flex",gap:4}}>
+                                  <button className="pixel-text" style={{...SC.imgUploadBtn,flex:1}} onClick={()=>imgRefs[c.id]?.click()}>
+                                    <span style={{fontSize:16}}>📷</span>
+                                    <span style={{fontSize:5,marginTop:3}}>LOCAL</span>
+                                  </button>
+                                  <button className="pixel-text" style={{...SC.imgUploadBtn,flex:1,borderColor:"#1a4a6a",color:"#4fc3f7"}}
+                                    onClick={()=>driveRefs[c.id]?.click()} disabled={driveUploading===c.id}>
+                                    <span style={{fontSize:16}}>{driveUploading===c.id?"⏳":"☁"}</span>
+                                    <span style={{fontSize:5,marginTop:3}}>{driveUploading===c.id?"UPLOADING...":"DRIVE"}</span>
+                                  </button>
+                                </div>
+                              )}
+                              <input type="file" accept="image/*" style={{display:"none"}} ref={el=>{imgRefs[c.id]=el;}} onChange={e=>handleImageUpload(c.id,e)}/>
+                              <input type="file" accept="image/*" style={{display:"none"}} ref={el=>{driveRefs[c.id]=el;}} onChange={e=>handleDriveUpload(c,e)}/>
+                            </div>
+                            <textarea className="screen-text" style={SC.notesArea}
+                              value={c.notes||""} onChange={e=>updateNotes(c.id,e.target.value)}
+                              placeholder="ABILITY IDEAS, LORE, SKETCH NOTES..." rows={3} maxLength={600}/>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:3}}>
+                              <span className="pixel-text" style={{fontSize:5,color:"#2a5a2a"}}>{(c.notes||"").length}/600</span>
+                              <span className="pixel-text" style={{fontSize:5,color:"#2a5a2a"}}>AUTO-SAVED</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:6,flex:1}}>
+              <div className="pixel-text" style={{fontSize:7,color:"#8aaa8a"}}>SELECT 2 FROM DEX LIST, THEN FUSE:</div>
+              <div style={{display:"flex",gap:6}}>
+                {[0,1].map(i=>{
+                  const c=hybridPick[i]; const col=c?elColor(c.element):"#2a4a2a";
+                  return (
+                    <div key={i} className="screen-text"
+                      style={{flex:1,border:`1px solid ${col}`,padding:"6px 8px",minHeight:46,color:c?col:"#2a4a2a",fontSize:14}}>
+                      {c?<>{c.element}<br/><span style={{color:"#cce8cc",fontWeight:700}}>{c.name||`${c.element} ${c.base.name}`}</span></>:`SLOT ${i+1}`}
+                    </div>
+                  );
+                })}
+              </div>
+              <button className="pixel-text"
+                style={{...SC.rollBtn,opacity:(!hybridPick[0]||!hybridPick[1]||hybridLoading)?.5:1,marginTop:4}}
+                disabled={!hybridPick[0]||!hybridPick[1]||hybridLoading} onClick={hybridize}>
+                {hybridLoading?<span className="blink">FUSING DATA...</span>:"⚗ FUSE [A]"}
+              </button>
+              {hybridResult&&!hybridResult.error && (
+                <div style={{border:`1px solid ${elColor(hybridResult.element)}`,padding:"8px 10px",background:"#050f05"}}>
+                  <div className="screen-text" style={{color:elColor(hybridResult.element),fontSize:14}}>{hybridResult.element.toUpperCase()}</div>
+                  <div className="screen-text" style={{color:"#cce8cc",fontSize:22,fontWeight:700,lineHeight:1.1}}>{hybridResult.name}</div>
+                  <div className="pixel-text" style={{color:"#4a8a4a",fontSize:7,marginTop:2}}>[{hybridResult.role}]</div>
+                  <p className="screen-text" style={{color:"#6a9a6a",fontSize:14,margin:"6px 0",lineHeight:1.4}}>{hybridResult.description}</p>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:6}}>
+                    {(hybridResult.tags||[]).map(t=><span key={t} className="screen-text" style={SC.tag}>{t}</span>)}
+                  </div>
+                  <button className="pixel-text" style={{...SC.rollBtn,fontSize:7,padding:"5px 10px"}} onClick={saveHybrid}>+ SAVE TO DEX</button>
+                </div>
+              )}
+              {hybridResult?.error && <div className="pixel-text" style={{color:"#ff4444",fontSize:7}}>{hybridResult.error}</div>}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Mount ─────────────────────────────────────────────────────────────────
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
