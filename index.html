@@ -195,7 +195,7 @@
       const [saved,         setSaved]         = useState(() => LS.get("cdex_saved", []));
       const [hybridPick,    setHybridPick]    = useState([null,null]);
       const [hybridResult,  setHybridResult]  = useState(null);
-      const [hybridLoading, setHybridLoading] = useState(false);
+      // hybridize is now instant — no loading state needed
       const [saveFlash,     setSaveFlash]     = useState(false);
       const [syncStatus,    setSyncStatus]    = useState("idle");
       const [syncMsg,       setSyncMsg]       = useState("");
@@ -298,28 +298,35 @@
         setHybridResult(null);
       };
 
-      const hybridize = async () => {
+      // Deterministic merge — no AI needed
+      const hybridize = () => {
         const [a,b] = hybridPick;
         if (!a||!b) return;
-        setHybridLoading(true); setHybridResult(null);
-        try {
-          const prompt = `You are a creature designer for a tactical creature-collector game.
-Hybridize these two creatures:
-A: ${a.element} ${a.base.name} (Role: ${a.role}, Tags: ${a.base.tags.join(", ")})
-B: ${b.element} ${b.base.name} (Role: ${b.role}, Tags: ${b.base.tags.join(", ")})
-Return ONLY valid JSON, no markdown:
-{"name":"creative name","element":"blended element","baseName":"hybrid base","role":"role","tags":["t1","t2","t3","t4","t5"],"description":"2 sentences on appearance and fighting style"}`;
-          const res  = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,messages:[{role:"user",content:prompt}]})});
-          const data = await res.json();
-          const text = data.content.map(c=>c.text||"").join("").trim().replace(/```json|```/g,"").trim();
-          setHybridResult(JSON.parse(text));
-        } catch { setHybridResult({error:"HYBRIDIZATION FAILED"}); }
-        setHybridLoading(false);
+        // Blend elements: same = keep, different = "A/B"
+        const element  = a.element === b.element ? a.element : `${a.element}/${b.element}`;
+        // Merge base names
+        const baseName = `${a.base.name}-${b.base.name}`;
+        // Pick the role from whichever parent has higher dexNum (arbitrary but consistent)
+        const role     = (a.dexNum||0) >= (b.dexNum||0) ? a.role : b.role;
+        // Union tags, deduplicated
+        const tags     = [...new Set([...(a.base.tags||[]), ...(b.base.tags||[])])];
+        const aName    = a.speciesName||a.name||`${a.element} ${a.base.name}`;
+        const bName    = b.speciesName||b.name||`${b.element} ${b.base.name}`;
+        setHybridResult({ element, baseName, role, tags, parentA: aName, parentB: bName });
       };
 
       const saveHybrid = () => {
-        if (!hybridResult||hybridResult.error) return;
-        const c = {id:uid(),name:hybridResult.name,element:hybridResult.element,role:hybridResult.role,base:{name:hybridResult.baseName,tags:hybridResult.tags||[]},description:hybridResult.description,isHybrid:true,parents:[hybridPick[0].name,hybridPick[1].name],dexNum:saved.length+1};
+        if (!hybridResult) return;
+        const c = {
+          id: uid(),
+          name: `${hybridResult.element} ${hybridResult.baseName}`,
+          element: hybridResult.element,
+          role: hybridResult.role,
+          base: { name: hybridResult.baseName, tags: hybridResult.tags },
+          isHybrid: true,
+          parents: [hybridResult.parentA, hybridResult.parentB],
+          dexNum: saved.length + 1,
+        };
         setSaved(p=>[c,...p]);
         setHybridResult(null); setHybridPick([null,null]);
       };
@@ -357,7 +364,7 @@ Return ONLY valid JSON, no markdown:
                   <div className="screen-anim" style={S.screenContent} key={tab}>
                     {tab==="roll"     && <RollScreen     rolled={rolled} rolling={rolling} rollCreature={rollCreature} saveCreature={saveCreature}/>}
                     {tab==="lists"    && <ListsScreen    elements={elements} setElements={setElements} bases={bases} setBases={setBases} roles={roles} setRoles={setRoles}/>}
-                    {tab==="bestiary" && <BestiaryScreen saved={saved} hybridPick={hybridPick} toggleHybrid={toggleHybrid} deleteCreature={deleteCreature} renameCreature={renameCreature} updateNotes={updateNotes} updateImage={updateImage} hybridize={hybridize} hybridLoading={hybridLoading} hybridResult={hybridResult} saveHybrid={saveHybrid}/>}
+                    {tab==="bestiary" && <BestiaryScreen saved={saved} hybridPick={hybridPick} toggleHybrid={toggleHybrid} deleteCreature={deleteCreature} renameCreature={renameCreature} updateNotes={updateNotes} updateImage={updateImage} hybridize={hybridize} hybridResult={hybridResult} saveHybrid={saveHybrid}/>}
                   </div>
                 </div>
                 <div style={{...S.screw,top:4,left:4}}/><div style={{...S.screw,top:4,right:4}}/>
@@ -598,7 +605,7 @@ Reply with ONLY the single word. Nothing else.`;
     }
 
     // ── BestiaryScreen ────────────────────────────────────────────────────────
-    function BestiaryScreen({ saved, hybridPick, toggleHybrid, deleteCreature, renameCreature, updateNotes, updateImage, hybridize, hybridLoading, hybridResult, saveHybrid }) {
+    function BestiaryScreen({ saved, hybridPick, toggleHybrid, deleteCreature, renameCreature, updateNotes, updateImage, hybridize, hybridResult, saveHybrid }) {
       const [subView,        setSubView]        = useState("list");
       const [editingId,      setEditingId]      = useState(null);
       const [editVal,        setEditVal]        = useState("");
@@ -800,23 +807,33 @@ Reply with ONLY the single word. Nothing else.`;
                 })}
               </div>
               <button className="pixel-text"
-                style={{...SC.rollBtn,opacity:(!hybridPick[0]||!hybridPick[1]||hybridLoading)?.5:1,marginTop:4}}
-                disabled={!hybridPick[0]||!hybridPick[1]||hybridLoading} onClick={hybridize}>
-                {hybridLoading?<span className="blink">FUSING DATA...</span>:"⚗ FUSE [A]"}
+                style={{...SC.rollBtn,opacity:(!hybridPick[0]||!hybridPick[1])?.5:1,marginTop:4}}
+                disabled={!hybridPick[0]||!hybridPick[1]} onClick={hybridize}>
+                ⚗ FUSE [A]
               </button>
-              {hybridResult&&!hybridResult.error && (
+              {hybridResult && (
                 <div style={{border:`1px solid ${elColor(hybridResult.element)}`,padding:"8px 10px",background:"#050f05"}}>
-                  <div className="screen-text" style={{color:elColor(hybridResult.element),fontSize:14}}>{hybridResult.element.toUpperCase()}</div>
-                  <div className="screen-text" style={{color:"#cce8cc",fontSize:22,fontWeight:700,lineHeight:1.1}}>{hybridResult.name}</div>
-                  <div className="pixel-text" style={{color:"#4a8a4a",fontSize:7,marginTop:2}}>[{hybridResult.role}]</div>
-                  <p className="screen-text" style={{color:"#6a9a6a",fontSize:14,margin:"6px 0",lineHeight:1.4}}>{hybridResult.description}</p>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:6}}>
-                    {(hybridResult.tags||[]).map(t=><span key={t} className="screen-text" style={SC.tag}>{t}</span>)}
+                  <div className="screen-text" style={{color:elColor(hybridResult.element),fontSize:13,letterSpacing:2}}>
+                    {hybridResult.element.toUpperCase()}
                   </div>
-                  <button className="pixel-text" style={{...SC.rollBtn,fontSize:7,padding:"5px 10px"}} onClick={saveHybrid}>+ SAVE TO DEX</button>
+                  <div className="screen-text" style={{color:"#ccffcc",fontSize:26,fontWeight:700,lineHeight:1.1,marginTop:2}}>
+                    {hybridResult.baseName}
+                  </div>
+                  <div className="pixel-text" style={{color:"#4a8a4a",fontSize:7,marginTop:4}}>[{hybridResult.role}]</div>
+                  <div className="screen-text" style={{color:"#4a7a4a",fontSize:13,marginTop:4}}>
+                    ⚗ {hybridResult.parentA} × {hybridResult.parentB}
+                  </div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:3,margin:"6px 0"}}>
+                    {hybridResult.tags.map(t=><span key={t} className="screen-text" style={SC.tag}>{t}</span>)}
+                  </div>
+                  <div className="pixel-text" style={{fontSize:6,color:"#4a6a4a",marginBottom:6}}>
+                    CLICK NAME TO RENAME AFTER SAVING
+                  </div>
+                  <button className="pixel-text" style={{...SC.rollBtn,fontSize:7,padding:"5px 10px"}} onClick={saveHybrid}>
+                    + SAVE TO DEX
+                  </button>
                 </div>
               )}
-              {hybridResult?.error && <div className="pixel-text" style={{color:"#ff4444",fontSize:7}}>{hybridResult.error}</div>}
             </div>
           )}
         </div>
