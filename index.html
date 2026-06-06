@@ -69,28 +69,114 @@
       set: (k,v)  => { try { localStorage.setItem(k,JSON.stringify(v)); } catch {} },
     };
 
-    // ── Google Sheets / Drive helpers ─────────────────────────────────────────
-    const GS_URL_KEY = "cdex_gs_url";
-    const gsGetUrl   = () => localStorage.getItem(GS_URL_KEY) || "";
-    const gsSaveUrl  = (url) => localStorage.setItem(GS_URL_KEY, url);
+    // ── Airtable helpers ──────────────────────────────────────────────────────
+    const AT_TOKEN_KEY  = "cdex_at_token";
+    const AT_BASE_KEY   = "cdex_at_base";
+    const atGetCreds    = () => ({ token: localStorage.getItem(AT_TOKEN_KEY)||"", base: localStorage.getItem(AT_BASE_KEY)||"" });
+    const atSaveCreds   = (token, base) => { localStorage.setItem(AT_TOKEN_KEY, token); localStorage.setItem(AT_BASE_KEY, base); };
 
-    const gsPush = async (scriptUrl, payload) => {
-      const slim = { ...payload, saved: payload.saved.map(({ imageData, ...rest }) => rest) };
-      const res  = await fetch(scriptUrl, {
-        method:"POST", headers:{"Content-Type":"text/plain"},
-        body: JSON.stringify({ action:"push", data:slim }), redirect:"follow",
+    const AT_TABLE = "creatures";
+
+    const atHeaders = (token) => ({
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    });
+
+    // Push: upsert all creatures by syncId, delete removed ones
+    const atPush = async (token, base, creatures) => {
+      const url = `https://api.airtable.com/v0/${base}/${AT_TABLE}`;
+
+      // Fetch existing records to get their Airtable record IDs
+      let existing = [];
+      let offset = null;
+      do {
+        const r = await fetch(`${url}${offset?`?offset=${offset}`:""}`, { headers: atHeaders(token) });
+        if (!r.ok) throw new Error(`Fetch failed: ${r.status} ${await r.text()}`);
+        const d = await r.json();
+        existing = existing.concat(d.records||[]);
+        offset = d.offset || null;
+      } while (offset);
+
+      const existingBySyncId = {};
+      existing.forEach(r => { if (r.fields.syncId) existingBySyncId[r.fields.syncId] = r.id; });
+
+      // Upsert in batches of 10
+      const toCreate = [], toUpdate = [];
+      creatures.forEach(c => {
+        const fields = {
+          syncId:      c.id,
+          dexNum:      c.dexNum || 0,
+          speciesName: c.speciesName || c.name || `${c.element} ${c.base?.name||""}`,
+          element:     c.element || "",
+          base:        c.base?.name || "",
+          role:        c.role || "",
+          tags:        (c.base?.tags||[]).join(", "),
+          notes:       c.notes || "",
+          isHybrid:    !!c.isHybrid,
+          parents:     c.parents ? c.parents.join(" × ") : "",
+          imageUrl:    (c.imageData && c.imageData.startsWith("http")) ? c.imageData : "",
+        };
+        if (existingBySyncId[c.id]) {
+          toUpdate.push({ id: existingBySyncId[c.id], fields });
+        } else {
+          toCreate.push({ fields });
+        }
       });
-      const text = await res.text();
-      let json; try { json=JSON.parse(text); } catch { throw new Error(text||"No response"); }
-      if (json.status !== "ok") throw new Error(json.message || "Push failed");
+
+      // Delete records no longer in the dex
+      const currentIds = new Set(creatures.map(c => c.id));
+      const toDelete = existing.filter(r => r.fields.syncId && !currentIds.has(r.fields.syncId)).map(r => r.id);
+
+      const batch = async (arr, fn) => {
+        for (let i = 0; i < arr.length; i += 10) await fn(arr.slice(i, i+10));
+      };
+
+      await batch(toCreate, async chunk => {
+        const r = await fetch(url, { method:"POST", headers:atHeaders(token), body:JSON.stringify({records:chunk}) });
+        if (!r.ok) throw new Error(`Create failed: ${await r.text()}`);
+      });
+      await batch(toUpdate, async chunk => {
+        const r = await fetch(url, { method:"PATCH", headers:atHeaders(token), body:JSON.stringify({records:chunk}) });
+        if (!r.ok) throw new Error(`Update failed: ${await r.text()}`);
+      });
+      await batch(toDelete, async chunk => {
+        const qs = chunk.map(id=>`records[]=${id}`).join("&");
+        const r  = await fetch(`${url}?${qs}`, { method:"DELETE", headers:atHeaders(token) });
+        if (!r.ok) throw new Error(`Delete failed: ${await r.text()}`);
+      });
     };
 
-    const gsPull = async (scriptUrl) => {
-      const res  = await fetch(`${scriptUrl}?action=pull&_=${Date.now()}`, { redirect:"follow" });
-      const text = await res.text();
-      let json; try { json=JSON.parse(text); } catch { throw new Error(text||"No response"); }
-      if (json.status !== "ok") throw new Error(json.message || "Pull failed");
-      return json.data;
+    // Pull: reconstruct saved array from Airtable records
+    const atPull = async (token, base) => {
+      const url = `https://api.airtable.com/v0/${base}/${AT_TABLE}?sort[0][field]=dexNum&sort[0][direction]=asc`;
+      let records = [], offset = null;
+      do {
+        const r = await fetch(`${url}${offset?`&offset=${offset}`:""}`, { headers: atHeaders(token) });
+        if (!r.ok) throw new Error(`Pull failed: ${r.status} ${await r.text()}`);
+        const d = await r.json();
+        records = records.concat(d.records||[]);
+        offset = d.offset || null;
+      } while (offset);
+
+      return records.map(r => {
+        const f = r.fields;
+        return {
+          id:          f.syncId || r.id,
+          dexNum:      f.dexNum || 0,
+          name:        f.speciesName || "",
+          speciesName: f.speciesName || "",
+          element:     f.element || "",
+          role:        f.role || "",
+          base: {
+            name: f.base || "",
+            tags: f.tags ? f.tags.split(", ").filter(Boolean) : [],
+          },
+          notes:     f.notes || "",
+          isHybrid:  !!f.isHybrid,
+          parents:   f.parents ? f.parents.split(" × ") : [],
+          imageData: f.imageUrl || null,
+        };
+      });
     };
 
     // ── Style constants ───────────────────────────────────────────────────────
@@ -198,8 +284,9 @@
       const [syncStatus,    setSyncStatus]    = useState("idle");
       const [syncMsg,       setSyncMsg]       = useState("");
       const [showConfig,    setShowConfig]    = useState(false);
-      const [gsDebug,       setGsDebug]       = useState("");
-      const [gsUrlInput,    setGsUrlInput]    = useState(() => gsGetUrl());
+      const [syncDebug,     setSyncDebug]     = useState("");
+      const [atTokenInput,  setAtTokenInput]  = useState(() => atGetCreds().token);
+      const [atBaseInput,   setAtBaseInput]   = useState(() => atGetCreds().base);
 
       useEffect(() => { LS.set("cdex_elements", elements); }, [elements]);
       useEffect(() => { LS.set("cdex_bases",    bases);    }, [bases]);
@@ -232,40 +319,37 @@
       };
 
       const syncPush = async () => {
-        const url = gsGetUrl();
-        if (!url) { setShowConfig(true); return; }
-        setSyncStatus("pushing"); setSyncMsg(""); setGsDebug("");
+        const { token, base } = atGetCreds();
+        if (!token||!base) { setShowConfig(true); return; }
+        setSyncStatus("pushing"); setSyncMsg(""); setSyncDebug("");
         try {
-          await gsPush(url, { elements, bases, roles, saved, pushedAt: new Date().toISOString() });
-          setSyncStatus("ok"); setSyncMsg("PUSHED ✓");
+          await atPush(token, base, saved);
+          setSyncStatus("ok"); setSyncMsg(`PUSHED ✓ ${saved.length} creatures`);
         } catch (e) {
           const msg = e?.message || String(e);
           setSyncStatus("error"); setSyncMsg("PUSH FAILED");
-          setGsDebug(msg); setShowConfig(true);
+          setSyncDebug(msg); setShowConfig(true);
         }
         setTimeout(() => setSyncStatus("idle"), 3500);
       };
 
       const syncPull = async () => {
-        const url = gsGetUrl();
-        if (!url) { setShowConfig(true); return; }
-        setSyncStatus("pulling"); setSyncMsg(""); setGsDebug("");
+        const { token, base } = atGetCreds();
+        if (!token||!base) { setShowConfig(true); return; }
+        setSyncStatus("pulling"); setSyncMsg(""); setSyncDebug("");
         try {
-          const data = await gsPull(url);
-          if (data.elements) setElements(data.elements);
-          if (data.bases)    setBases(data.bases);
-          if (data.roles)    setRoles(data.roles);
-          if (data.saved)    setSaved(data.saved);
-          setSyncStatus("ok"); setSyncMsg("PULLED ✓");
+          const creatures = await atPull(token, base);
+          setSaved(creatures);
+          setSyncStatus("ok"); setSyncMsg(`PULLED ✓ ${creatures.length} creatures`);
         } catch (e) {
           const msg = e?.message || String(e);
           setSyncStatus("error"); setSyncMsg("PULL FAILED");
-          setGsDebug(msg); setShowConfig(true);
+          setSyncDebug(msg); setShowConfig(true);
         }
         setTimeout(() => setSyncStatus("idle"), 3500);
       };
 
-      const saveConfig = () => { gsSaveUrl(gsUrlInput.trim()); setShowConfig(false); };
+      const saveConfig = () => { atSaveCreds(atTokenInput.trim(), atBaseInput.trim()); setShowConfig(false); };
 
       const rollCreature = () => {
         if (rolling) return;
@@ -418,14 +502,18 @@
                 )}
                 {showConfig && (
                   <div style={S.configPanel}>
-                    <div className="pixel-text" style={{fontSize:7,color:"#4fc3f7",marginBottom:8}}>☁ SHEETS CONFIG</div>
-                    <label className="pixel-text" style={S.configLabel}>APPS SCRIPT URL</label>
+                    <div className="pixel-text" style={{fontSize:7,color:"#4fc3f7",marginBottom:8}}>☁ AIRTABLE CONFIG</div>
+                    <label className="pixel-text" style={S.configLabel}>API TOKEN</label>
                     <input className="screen-text" style={S.configInput}
-                      value={gsUrlInput} onChange={e=>setGsUrlInput(e.target.value)}
-                      placeholder="https://script.google.com/macros/s/..."/>
-                    {gsDebug && (
+                      value={atTokenInput} onChange={e=>setAtTokenInput(e.target.value)}
+                      placeholder="pat..." type="password"/>
+                    <label className="pixel-text" style={{...S.configLabel,marginTop:6}}>BASE ID</label>
+                    <input className="screen-text" style={S.configInput}
+                      value={atBaseInput} onChange={e=>setAtBaseInput(e.target.value)}
+                      placeholder="app..."/>
+                    {syncDebug && (
                       <div className="screen-text" style={{marginTop:6,padding:"4px 6px",background:"#1a0000",border:"1px solid #4a0000",color:"#ff6666",fontSize:13,wordBreak:"break-all"}}>
-                        {gsDebug}
+                        {syncDebug}
                       </div>
                     )}
                     <div style={{display:"flex",gap:6,marginTop:8,justifyContent:"flex-end"}}>
