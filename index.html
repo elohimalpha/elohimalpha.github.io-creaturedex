@@ -149,9 +149,7 @@
       desc:{ fontSize:13, color:"#5a8a5a", lineHeight:1.5, margin:0, fontStyle:"italic" },
       hybridBadge:{ fontSize:13, color:"#aacc44" },
       emptyScreen:{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:4 },
-      nameRow:{ display:"flex", alignItems:"center", gap:8, padding:"5px 0", borderTop:"1px solid #1a3a1a", marginTop:2 },
-      suggestedName:{ fontSize:26, fontWeight:700, color:"#ffdd44", flex:1, letterSpacing:1, lineHeight:1 },
-      nameBtn:{ fontSize:7, padding:"4px 8px", cursor:"pointer", background:"#0a1a00", color:"#ffdd44", border:"1px solid #4a4a00", fontFamily:"'Press Start 2P',monospace", whiteSpace:"nowrap" },
+
       rollBtn:{ marginTop:"auto", padding:"8px 12px", fontSize:8, background:"#0a1a0a", color:"#aaffaa", border:"2px solid #2a5a2a", cursor:"pointer", letterSpacing:1, width:"100%", boxShadow:"0 3px 0 #051005", transition:"all .1s", fontFamily:"'Press Start 2P',monospace" },
       subTabs:{ display:"flex", gap:4, marginBottom:6 },
       subTab:{ fontSize:6, padding:"4px 6px", cursor:"pointer", background:"transparent", color:"#4a7a4a", border:"1px solid #1a3a1a", fontFamily:"'Press Start 2P',monospace" },
@@ -445,30 +443,6 @@
 
     // ── RollScreen ────────────────────────────────────────────────────────────
     function RollScreen({ rolled, rolling, rollCreature, saveCreature }) {
-      const [suggestedName, setSuggestedName] = useState(null);
-      const [naming,        setNaming]        = useState(false);
-      useEffect(() => { setSuggestedName(null); }, [rolled?.element, rolled?.base?.name, rolled?.role]);
-
-      const suggestName = async () => {
-        if (!rolled||naming) return;
-        setNaming(true); setSuggestedName(null);
-        try {
-          const prompt = `You are naming creatures for a creature-collector tactical game (think Pokémon).
-Generate ONE single invented species name for this creature:
-- Element: ${rolled.element}
-- Base animal/plant: ${rolled.base.name}
-- Battle role: ${rolled.role}
-- Tags: ${rolled.base.tags?.join(", ")||"none"}
-Rules: One word only, no spaces/hyphens. Invented portmanteau. Bulbasaur/Magmar/Quilava style. 2-4 syllables.
-Reply with ONLY the single word. Nothing else.`;
-          const res  = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:20,messages:[{role:"user",content:prompt}]})});
-          const data = await res.json();
-          const word = data.content.map(c=>c.text||"").join("").trim().replace(/[^a-zA-Z]/g,"");
-          if (word) setSuggestedName(word);
-        } catch { setSuggestedName("ERROR"); }
-        setNaming(false);
-      };
-
       return (
         <div style={SC.root}>
           <div className="pixel-text" style={SC.screenTitle}>
@@ -487,22 +461,6 @@ Reply with ONLY the single word. Nothing else.`;
                   {rolled.base.tags.map(t=><span key={t} className="screen-text" style={SC.tag}>{t}</span>)}
                 </div>
               )}
-              {!rolling && (
-                <div style={SC.nameRow}>
-                  {suggestedName&&suggestedName!=="ERROR" ? (
-                    <>
-                      <span className="screen-text" style={SC.suggestedName}>{suggestedName}</span>
-                      <button className="pixel-text" style={SC.nameBtn} onClick={suggestName}>↺</button>
-                    </>
-                  ) : (
-                    <button className="pixel-text" style={SC.nameBtn} onClick={suggestName} disabled={naming}>
-                      {naming?<span className="blink">…</span>:"★ NAME IT"}
-                    </button>
-                  )}
-                  {suggestedName==="ERROR"&&<span className="pixel-text" style={{fontSize:6,color:"#ff4444"}}>ERROR</span>}
-                </div>
-              )}
-              {rolled.description && <p className="screen-text" style={SC.desc}>{rolled.description}</p>}
               {rolled.isHybrid && <div className="screen-text" style={SC.hybridBadge}>⚗ {rolled.parents?.join(" × ")}</div>}
               {!rolled.id&&!rolling && <div style={{marginTop:8,textAlign:"center"}}><span className="pixel-text" style={{fontSize:7,color:"#8aff8a"}}>PRESS B TO SAVE</span></div>}
               {rolled.id && <div style={{marginTop:8,textAlign:"center"}}><span className="pixel-text" style={{fontSize:7,color:"#ffdd44"}}>★ SAVED TO DEX</span></div>}
